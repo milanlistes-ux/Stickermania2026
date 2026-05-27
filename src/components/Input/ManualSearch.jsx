@@ -1,10 +1,12 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef } from 'react'
 import { SECTIONS } from '../../data/album'
 import { getStickerStatus, setStickerStatus } from '../../lib/userStore'
 
 export default function ManualSearch({ onClose }) {
   const [query, setQuery] = useState('')
   const [updated, setUpdated] = useState({})
+  const [lastAdded, setLastAdded] = useState(null)
+  const inputRef = useRef()
 
   const results = useMemo(() => {
     if (!query.trim()) return []
@@ -43,6 +45,10 @@ export default function ManualSearch({ onClose }) {
     const next = (cur + 1) % 3
     setStickerStatus(code, next)
     setUpdated(p => ({ ...p, [code]: next }))
+    // Clear search and keep keyboard open for rapid entry
+    setLastAdded(code)
+    setQuery('')
+    inputRef.current?.focus()
   }
 
   return (
@@ -50,14 +56,19 @@ export default function ManualSearch({ onClose }) {
       <div className="flex items-center bg-gray-100 rounded-xl px-3 gap-2 mb-1">
         <span className="text-gray-400">🔍</span>
         <input
+          ref={inputRef}
           autoFocus
           className="flex-1 bg-transparent py-3 text-sm outline-none"
-          placeholder="Type code or country (e.g. AUT, Austria, AUT18)"
+          placeholder="Type code or country (e.g. AUT, NED…)"
           value={query}
           onChange={e => setQuery(e.target.value)}
         />
-        {query && <button onClick={() => setQuery('')} className="text-gray-400 text-lg">×</button>}
+        {query && <button onClick={() => { setQuery(''); inputRef.current?.focus() }} className="text-gray-400 text-lg">×</button>}
       </div>
+
+      {lastAdded && !query && (
+        <div className="text-xs text-green-600 mb-2 px-1 font-semibold">✓ {lastAdded} added — type next code</div>
+      )}
 
       <div className="text-xs text-gray-400 mb-3 px-1">
         Tap a sticker to cycle: <span className="text-yellow-600">Missing</span> → <span className="text-blue-600">Have</span> → <span className="text-green-600">Swap</span>
