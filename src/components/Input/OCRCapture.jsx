@@ -102,7 +102,16 @@ export default function OCRCapture({ onClose }) {
         )
         setStatus('error')
       } else {
-        setResults([...allCodes].map(code => ({ code, current: getStickerStatus(code) })))
+        // Auto-apply smart status: missing→have, have→swap (duplicate)
+        const mapped = [...allCodes].map(code => {
+          const existing = getStickerStatus(code)
+          const auto = existing === 0 ? 1   // don't have it → mark Have
+                     : existing === 1 ? 2   // already have it → mark Swap
+                     : 2                    // already swap → keep as Swap
+          setStickerStatus(code, auto)
+          return { code, current: auto }
+        })
+        setResults(mapped)
         setStatus('results')
       }
     } catch (e) {
@@ -185,7 +194,7 @@ export default function OCRCapture({ onClose }) {
       {status === 'results' && (
         <div>
           <div className="text-sm text-gray-500 mb-3">
-            Found <strong>{results.length}</strong> sticker{results.length !== 1 ? 's' : ''}. Tap to set status.
+            Found <strong>{results.length}</strong> sticker{results.length !== 1 ? 's' : ''} — auto-marked below. Tap any to correct.
           </div>
           <div className="space-y-2 mb-4">
             {results.map(({ code, current }) => (
