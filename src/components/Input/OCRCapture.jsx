@@ -2,112 +2,127 @@ import { useState, useRef } from 'react'
 import { parseCode } from '../../data/album'
 import { setStickerStatus, getStickerStatus } from '../../lib/userStore'
 
-export default function OCRCapture({ onClose }) {
-  const [status, setStatus] = useState('idle') // idle | scanning | results | error
-  const [results, setResults] = useState([])
-  const [error, setError] = useState('')
-  const [progress, setProgress] = useState('')
-  const fileRef = useRef()
-
-  // Preprocess image: upscale + invert dark badge areas so white-on-dark becomes black-on-white
-  async function preprocessImage(file) {
-    return new Promise((resolve) => {
-      const img = new Image()
-      const url = URL.createObjectURL(file)
-      img.onload = () => {
-        // Upscale to at least 2400px on long side for better OCR on small badges
-        const scale = Math.max(1, 2400 / Math.max(img.width, img.height))
-        const canvas = document.createElement('canvas')
-        canvas.width = Math.round(img.width * scale)
-        canvas.height = Math.round(img.height * scale)
-        const ctx = canvas.getContext('2d')
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-        const d = imageData.data
-
-        for (let i = 0; i < d.length; i += 4) {
-          const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
-          // Invert: very dark pixels (badge background) → white
-          //         lighter pixels (badge text, card bg)  → black
-          // This turns white-on-dark badge text into black-on-white → OCR-friendly
-          const val = gray < 110 ? 255 : 0
-          d[i] = d[i + 1] = d[i + 2] = val
-          d[i + 3] = 255
-        }
-
-        ctx.putImageData(imageData, 0, 0)
-        canvas.toBlob(blob => {
-          URL.revokeObjectURL(url)
-          resolve(blob)
-        }, 'image/png')
+// Preprocess: grayscale + invert-threshold at given level, upscale for OCR
+async function preprocessImage(file, threshold = 110) {
+  return new Promise((resolve) => {
+    const img = new Image()
+    const url = URL.createObjectURL(file)
+    img.onload = () => {
+      const scale = Math.max(1, 2400 / Math.max(img.width, img.height))
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.round(img.width * scale)
+      canvas.height = Math.round(img.height * scale)
+      const ctx = canvas.getContext('2d')
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+      const d = imageData.data
+      for (let i = 0; i < d.length; i += 4) {
+        const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
+        // Invert: dark badge bg → white, badge text → black (OCR-friendly)
+        const val = gray < threshold ? 255 : 0
+        d[i] = d[i + 1] = d[i + 2] = val
+        d[i + 3] = 255
       }
-      img.src = url
-    })
-  }
-
-  async function runOCR(blob, psm) {
-    const { createWorker } = await import('tesseract.js')
-    const worker = await createWorker('eng', 1, { logger: () => {} })
-    await worker.setParameters({
-      // Only recognise letters and digits — ignores all FIFA/Panini noise
-      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ',
-      tessedit_pageseg_mode: String(psm),
-    })
-    const { data: { text } } = await worker.recognize(blob)
-    await worker.terminate()
-    return text
-  }
-
-  function extractCodes(text) {
-    const found = new Set()
-    // Match 2–3 uppercase letters followed by optional space and 1–2 digits
-    const matches = [...text.matchAll(/([A-Z]{2,3})\s*(\d{1,2})/g)]
-    for (const m of matches) {
-      const code = parseCode(`${m[1]}${m[2]}`)
-      if (code) found.add(code)
+      ctx.putImageData(imageData, 0, 0)
+      canvas.toBlob(blob => { URL.revokeObjectURL(url); resolve(blob) }, 'image/png')
     }
-    return found
+    img.src = url
+  })
+}
+
+// Rotate a blob by 0/90/180/270 degrees
+async function rotateBlob(blob, degrees) {
+  if (degrees === 0) return blob
+  return new Promise((resolve) => {
+    const img = new Image()
+    const url = URL.createObjectURL(blob)
+    img.onload = () => {
+      const swap = degrees === 90 || degrees === 270
+      const canvas = document.createElement('canvas')
+      canvas.width  = swap ? img.height : img.width
+      canvas.height = swap ? img.width  : img.height
+      const ctx = canvas.getContext('2d')
+      ctx.translate(canvas.width / 2, canvas.height / 2)
+      ctx.rotate((degrees * Math.PI) / 180)
+      ctx.drawImage(img, -img.width / 2, -img.height / 2)
+      canvas.toBlob(blob => { URL.revokeObjectURL(url); resolve(blob) }, 'image/png')
+    }
+    img.src = url
+  })
+}
+
+function extractCodes(text) {
+  const found = new Set()
+  const matches = [...text.matchAll(/([A-Z]{2,3})\s*(\d{1,2})/g)]
+  for (const m of matches) {
+    const code = parseCode(`${m[1]}${m[2]}`)
+    if (code) found.add(code)
   }
+  return found
+}
+
+export default function OCRCapture({ onClose }) {
+  const [status, setStatus]   = useState('idle')
+  const [results, setResults] = useState([])
+  const [error, setError]     = useState('')
+  const [progress, setProgress] = useState({ step: 0, total: 0, label: '' })
+  const fileRef = useRef()
 
   async function processImage(file) {
     setStatus('scanning')
     setError('')
-    setProgress('Preprocessing image…')
 
     try {
-      const preprocessed = await preprocessImage(file)
+      const { createWorker } = await import('tesseract.js')
 
-      // Pass 1: PSM 11 — sparse text, best for multiple stickers spread across image
-      setProgress('Scanning (pass 1/2)…')
-      const text1 = await runOCR(preprocessed, 11)
+      // Build all image blobs to scan:
+      // thresholds 80 & 120 × rotations 0°/90°/180°/270° = 8 preprocessed
+      // + original image at 0°/90° = 2
+      // Total = 10 passes, 1 worker reused throughout
+      const thresholds = [80, 120]
+      const rotations  = [0, 90, 180, 270]
 
-      // Pass 2: PSM 6 — uniform block, catches codes OCR missed in pass 1
-      setProgress('Scanning (pass 2/2)…')
-      const text2 = await runOCR(preprocessed, 6)
+      const blobs = []
+      setProgress({ step: 0, total: 0, label: 'Preparing images…' })
 
-      // Also try original image with PSM 11 as a third pass
-      setProgress('Finalising…')
-      const text3 = await runOCR(file, 11)
+      for (const t of thresholds) {
+        const pre = await preprocessImage(file, t)
+        for (const r of rotations) {
+          blobs.push(await rotateBlob(pre, r))
+        }
+      }
+      // Also include the original (no threshold inversion) at 0° and 90°
+      for (const r of [0, 90]) {
+        blobs.push(await rotateBlob(file, r))
+      }
 
-      const allCodes = new Set([
-        ...extractCodes(text1),
-        ...extractCodes(text2),
-        ...extractCodes(text3),
-      ])
+      const total = blobs.length
+      setProgress({ step: 0, total, label: 'Starting OCR…' })
+
+      const worker = await createWorker('eng', 1, { logger: () => {} })
+      await worker.setParameters({
+        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ',
+        tessedit_pageseg_mode: '11', // sparse text — best for multi-sticker layouts
+      })
+
+      const allCodes = new Set()
+      for (let i = 0; i < blobs.length; i++) {
+        setProgress({ step: i + 1, total, label: `Scanning pass ${i + 1} of ${total}…` })
+        const { data: { text } } = await worker.recognize(blobs[i])
+        for (const code of extractCodes(text)) allCodes.add(code)
+      }
+
+      await worker.terminate()
 
       if (allCodes.size === 0) {
         setError(
-          'No sticker codes found. Tips: make sure the upper-right badge (e.g. "SWE 1") is in frame, use good lighting, and hold the camera steady.'
+          'No sticker codes found. Tips: lay stickers flat with badges visible, use good lighting, avoid heavy shadows.'
         )
         setStatus('error')
       } else {
-        // Auto-apply smart status: missing→have, have→swap (duplicate)
         const mapped = [...allCodes].map(code => {
           const existing = getStickerStatus(code)
-          const auto = existing === 0 ? 1   // don't have it → mark Have
-                     : existing === 1 ? 2   // already have it → mark Swap
-                     : 2                    // already swap → keep as Swap
+          const auto = existing === 0 ? 1 : 2   // new → Have, duplicate → Swap
           setStickerStatus(code, auto)
           return { code, current: auto }
         })
@@ -147,12 +162,13 @@ export default function OCRCapture({ onClose }) {
           <div className="text-center">
             <div className="font-semibold text-gray-800 mb-1">Scan sticker backs</div>
             <div className="text-sm text-gray-500 mb-3">
-              The dark badge in the upper-right (e.g. <strong>SWE 1</strong>) will be detected automatically.
+              The dark badge in the upper-right (e.g. <strong>SWE 1</strong>) is detected automatically — even on rotated stickers.
             </div>
             <div className="bg-blue-50 rounded-xl p-3 text-xs text-blue-700 text-left space-y-1">
               <div>✅ Good lighting, flat surface</div>
               <div>✅ All badges clearly visible, not overlapping</div>
-              <div>✅ Up to ~6 stickers per scan works well</div>
+              <div>✅ Rotated stickers are handled automatically</div>
+              <div>⏱ ~30 sec for 6+ stickers (10-pass scan)</div>
             </div>
           </div>
           <button
@@ -166,7 +182,6 @@ export default function OCRCapture({ onClose }) {
               const input = fileRef.current
               input.removeAttribute('capture')
               input.click()
-              // Restore capture attribute for next time
               setTimeout(() => input.setAttribute('capture', 'environment'), 500)
             }}
             className="w-full py-3 border border-gray-300 text-gray-600 rounded-xl font-semibold"
@@ -177,10 +192,20 @@ export default function OCRCapture({ onClose }) {
       )}
 
       {status === 'scanning' && (
-        <div className="flex flex-col items-center pt-12 gap-4">
-          <div className="w-12 h-12 rounded-full border-4 border-brand border-t-transparent animate-spin" />
-          <div className="text-gray-500 text-sm text-center">{progress}</div>
-          <div className="text-xs text-gray-400">Running 3 OCR passes for best results…</div>
+        <div className="flex flex-col items-center pt-12 gap-5">
+          <div className="w-14 h-14 rounded-full border-4 border-brand border-t-transparent animate-spin" />
+          <div className="text-gray-700 font-semibold text-center">{progress.label}</div>
+          {progress.total > 0 && (
+            <div className="w-full bg-gray-100 rounded-full h-2">
+              <div
+                className="bg-brand h-2 rounded-full transition-all duration-300"
+                style={{ width: `${(progress.step / progress.total) * 100}%` }}
+              />
+            </div>
+          )}
+          <div className="text-xs text-gray-400 text-center">
+            Scanning {progress.total} image variations (different angles &amp; contrast levels) to maximise accuracy
+          </div>
         </div>
       )}
 
