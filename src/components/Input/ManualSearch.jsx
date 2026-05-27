@@ -11,8 +11,9 @@ const STATUS_LABEL = ['—', '✓', '⇄']
 
 export default function ManualSearch({ onClose }) {
   const [query, setQuery]               = useState('')
-  const [selected, setSelected]         = useState(null) // section object
+  const [selected, setSelected]         = useState(null)
   const [updated, setUpdated]           = useState({})
+  const [inputKey, setInputKey]         = useState(0) // increment to force-remount input
   const inputRef = useRef()
 
   const suggestions = useMemo(() => {
@@ -31,8 +32,7 @@ export default function ManualSearch({ onClose }) {
   function backToSearch() {
     setSelected(null)
     setQuery('')
-    // Small timeout gives iOS time to re-show keyboard after state settles
-    setTimeout(() => inputRef.current?.focus(), 50)
+    setInputKey(k => k + 1) // force fresh input element so iOS shows it empty
   }
 
   function getStatus(code) {
@@ -63,6 +63,7 @@ export default function ManualSearch({ onClose }) {
           <div className="flex items-center bg-gray-100 rounded-xl px-3 gap-2">
             <span className="text-gray-400">🔍</span>
             <input
+              key={inputKey}
               ref={inputRef}
               autoFocus
               className="flex-1 bg-transparent py-3 text-sm outline-none"
