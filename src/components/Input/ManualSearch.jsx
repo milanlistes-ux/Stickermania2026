@@ -88,6 +88,7 @@ export default function ManualSearch({ onClose }) {
             return (
               <button
                 key={code}
+                onPointerDown={e => e.preventDefault()}
                 onClick={() => cycle(code)}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border-2 transition-all ${styles[status]}`}
               >
