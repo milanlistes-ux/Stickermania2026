@@ -12,6 +12,7 @@ export default function AlbumView({ onOpenInput }) {
 
   const handleUpdate = useCallback(() => {
     setStickers(getLocalStickers())
+    setSearch('')
   }, [])
 
   const filtered = search
