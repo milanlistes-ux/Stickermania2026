@@ -25,6 +25,7 @@ export default function ManualSearch({ onClose }) {
   }, [query, selected])
 
   function pickSection(section) {
+    inputRef.current?.blur() // dismiss keyboard before showing number grid
     setSelected(section)
     setQuery(section.id)
   }
